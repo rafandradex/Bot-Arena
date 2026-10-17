@@ -1,51 +1,225 @@
-const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
-const { getLeaderboard } = require('../utils/helpers');
+const {
+  SlashCommandBuilder,
+  MessageFlags,
+  PermissionFlagsBits,
+  ChannelType
+} = require('discord.js');
+
+const { LeaderboardModel } = require('../utils/models');
+
+const {
+  buildLeaderboardEmbed,
+  refreshLeaderboardMessage
+} = require('../utils/leaderboard');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('leaderboard')
-    .setDescription('Shows the Top 10 players for a specific game')
-    .addStringOption(o => o.setName('game').setDescription('Game name (e.g., Brawlhalla)').setRequired(true)),
-    
+    .setDescription('Staff: publishes the automatic tournament leaderboard')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .addStringOption(option =>
+      option
+        .setName('game')
+        .setDescription('Select the game')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Brawlhalla', value: 'brawlhalla' },
+          { name: 'Valorant', value: 'valorant' },
+          { name: 'CS2', value: 'cs2' }
+        )
+    )
+    .addChannelOption(option =>
+      option
+        .setName('channel')
+        .setDescription('Channel where the leaderboard will be published')
+        .addChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement
+        )
+    ),
+
   async execute(interaction) {
-    await interaction.deferReply(); 
-    
-    const game = interaction.options.getString('game');
-    const gameKey = game.toLowerCase().trim();
-    
-    const leaderboard = await getLeaderboard();
-    const gameData = leaderboard[gameKey];
-
-    // Se ainda não houver vitórias registadas para este jogo
-    if (!gameData || Object.keys(gameData).length === 0) {
-      return interaction.editReply({ content: `❌ No tournament records found for **${game}** yet.` });
+    if (!interaction.inGuild()) {
+      return interaction.reply({
+        content: '❌ This command can only be used in a server.',
+        flags: MessageFlags.Ephemeral
+      });
     }
 
-    // Organizar jogadores pelo número de vitórias (do maior para o menor) e pegar no Top 10
-    const topPlayers = Object.entries(gameData)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
+    await interaction.deferReply({
+      flags: MessageFlags.Ephemeral
+    });
 
-    const embed = new EmbedBuilder()
-      .setTitle(`🏆 ${game} - Leaderboard Top 10`)
-      .setDescription('Who reigns supreme in the Glitch Arena?\n\n')
-      .setColor(0xffd700)
-      .setThumbnail(interaction.guild.iconURL())
-      .setTimestamp();
+    const member = await interaction.guild.members.fetch(
+      interaction.user.id
+    );
 
-    let description = '';
-    const medals = ['🥇', '🥈', '🥉'];
-    
-    // Gerar a lista formatada
-    for (let i = 0; i < topPlayers.length; i++) {
-      const [userId, wins] = topPlayers[i];
-      const medal = medals[i] || `**#${i + 1}**`;
-      const winText = wins === 1 ? 'Win' : 'Wins';
-      description += `${medal} <@${userId}> — **${wins}** ${winText}\n`;
+    const isStaff =
+      Boolean(process.env.STAFF_ROLE_ID) &&
+      member.roles.cache.has(process.env.STAFF_ROLE_ID);
+
+    const canManageMessages = member.permissions.has(
+      PermissionFlagsBits.ManageMessages
+    );
+
+    if (!isStaff && !canManageMessages) {
+      return interaction.editReply({
+        content: '❌ Only staff can publish the leaderboard.'
+      });
     }
 
-    embed.setDescription(description);
+    const game = interaction.options
+      .getString('game')
+      .trim()
+      .toLowerCase();
 
-    await interaction.editReply({ embeds: [embed] });
+    if (!game) {
+      return interaction.editReply({
+        content: '❌ Enter a game name.'
+      });
+    }
+
+    const channel =
+      interaction.options.getChannel('channel') ||
+      interaction.channel;
+
+    if (
+      !channel ||
+      ![
+        ChannelType.GuildText,
+        ChannelType.GuildAnnouncement
+      ].includes(channel.type)
+    ) {
+      return interaction.editReply({
+        content: '❌ Select a text or announcement channel.'
+      });
+    }
+
+    const botMember = await interaction.guild.members.fetchMe();
+    const permissions = channel.permissionsFor(botMember);
+
+    if (!permissions?.has([
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.EmbedLinks,
+      PermissionFlagsBits.ReadMessageHistory
+    ])) {
+      return interaction.editReply({
+        content:
+          '❌ The bot needs View Channel, Send Messages, Embed Links and Read Message History permissions.'
+      });
+    }
+
+    const board = await LeaderboardModel.findOne({ game });
+
+    // Envia uma mensagem normal e permanente no canal.
+    const message = await channel.send({
+      embeds: [
+        buildLeaderboardEmbed(
+          board || {
+            game,
+            players: new Map(),
+            playerNames: new Map()
+          },
+          interaction.guild
+        )
+      ],
+      allowedMentions: {
+        parse: []
+      }
+    });
+
+    const filter = { game };
+
+    const update = {
+      $set: {
+        leaderboardChannelId: channel.id,
+        leaderboardMessageId: message.id
+      }
+    };
+
+    try {
+      try {
+        await LeaderboardModel.findOneAndUpdate(
+          filter,
+          update,
+          { upsert: true }
+        );
+      } catch (error) {
+        if (error.code !== 11000) throw error;
+
+        const saved = await LeaderboardModel.findOneAndUpdate(
+          filter,
+          update
+        );
+
+        if (!saved) throw error;
+      }
+    } catch (error) {
+      console.error('Error saving leaderboard panel:', error);
+
+      await message.delete().catch(() => { });
+
+      return interaction.editReply({
+        content:
+          '❌ Could not configure the automatic leaderboard. Check the database connection.'
+      });
+    }
+
+    let warning = '';
+
+    try {
+      await refreshLeaderboardMessage(
+        interaction.client,
+        game
+      );
+    } catch (error) {
+      console.error('Error refreshing leaderboard:', error);
+
+      warning =
+        '\n⚠️ The initial refresh failed. Check the bot channel permissions.';
+    }
+
+    // Desativa visualmente o painel anterior, se existir.
+    if (
+      board?.leaderboardChannelId &&
+      board?.leaderboardMessageId
+    ) {
+      try {
+        const oldChannel = await interaction.guild.channels.fetch(
+          board.leaderboardChannelId
+        );
+
+        if (oldChannel?.messages) {
+          const oldMessage = await oldChannel.messages.fetch(
+            board.leaderboardMessageId
+          );
+
+          await oldMessage.edit({
+            content:
+              `📌 This leaderboard has moved: ${message.url}`,
+            embeds: [],
+            allowedMentions: {
+              parse: []
+            }
+          });
+        }
+      } catch (error) {
+        console.error(
+          'Could not update the previous leaderboard panel:',
+          error
+        );
+
+        warning +=
+          '\n⚠️ The previous panel could not be marked as replaced. Remove it manually if needed.';
+      }
+    }
+
+    return interaction.editReply({
+      content:
+        `✅ Leaderboard published in ${channel}!\n` +
+        'It will update automatically after new /result entries.' +
+        warning
+    });
   }
 };
