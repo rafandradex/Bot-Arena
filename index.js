@@ -3,7 +3,7 @@ process.env.TZ = process.env.TZ || 'Europe/Lisbon';
 
 const fs = require('fs');
 const path = require('path');
-const { Client, GatewayIntentBits, Collection, Options } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Options, Partials } = require('discord.js');
 const mongoose = require('mongoose'); // IMPORTAR MONGOOSE
 
 const client = new Client({
@@ -13,12 +13,17 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildMessageReactions // 👉 OBRIGATÓRIO PARA REAÇÕES
   ],
-  // 👉 ADICIONA ISTO PARA POUPAR RAM:
+  partials: [
+    Partials.Message,  // 👉 OBRIGATÓRIO PARA LER MENSAGENS ANTIGAS
+    Partials.Channel,
+    Partials.Reaction  // 👉 OBRIGATÓRIO PARA LER REAÇÕES ANTIGAS
+  ],
   makeCache: Options.cacheWithLimits({
-    MessageManager: 10, // Só guarda 10 mensagens na memória em vez de 200
-    PresenceManager: 0, // Não guarda o estado "Online/Offline" das pessoas
-    ThreadManager: 0,   // Não guarda threads na RAM
+    MessageManager: 10, 
+    PresenceManager: 0, 
+    ThreadManager: 0,   
   }),
 });
 
@@ -34,6 +39,7 @@ if (!process.env.MONGO_URI) {
     .then(() => console.log('🍃 Conectado ao MongoDB com sucesso!'))
     .catch((err) => console.error('❌ Erro ao conectar ao MongoDB:', err));
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Carregar Comandos (Command Handler)                                */

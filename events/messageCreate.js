@@ -46,8 +46,15 @@ module.exports = {
                     .setDescription(`Congratulations ${message.author}, you just advanced to **Level ${newLevel}**!`)
                     .setColor(0xffd700);
 
+                // 👉 Enviar para o canal definido no .env (ou usar o canal atual se o .env não estiver configurado)
+                let targetChannel = message.channel;
+                if (process.env.LEVEL_CHANNEL_ID) {
+                    const fetchedChannel = await message.guild.channels.fetch(process.env.LEVEL_CHANNEL_ID).catch(() => null);
+                    if (fetchedChannel) targetChannel = fetchedChannel;
+                }
+
                 // Envia a mensagem e apaga passado 10 segundos para não sujar o chat
-                const levelMsg = await message.channel.send({ embeds: [embed] }).catch(() => null);
+                const levelMsg = await targetChannel.send({ embeds: [embed] }).catch(() => null);
                 if (levelMsg) {
                     setTimeout(() => levelMsg.delete().catch(() => null), 10000);
                 }

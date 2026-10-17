@@ -5,7 +5,7 @@ module.exports = {
   name: Events.MessageDelete,
   async execute(message, client) {
     // Ignorar mensagens de bots ou DMs
-    if (!message.guild || message.author?.bot) return;
+    if (!message.guild || !message.author || message.author.bot) return;
 
     let executor = 'Unknown / Author';
 
